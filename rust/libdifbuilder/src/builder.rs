@@ -2092,120 +2092,109 @@ fn solve_matrix(
     uv1: f64,
     uv2: f64,
 ) -> PlaneF {
-    use nalgebra::base::DMatrix;
-    use nalgebra::SVD;
+    // We want to find a, b, c, d such that:
+    //   a*x + b*y + c*z + d = uv
+    // for each of the 3 vertices.
+    //
+    // Using barycentric approach: express uv as affine function of position.
+    // uv = uv0 + grad · (p - p0), where grad is a 3D vector in the triangle plane.
+    // grad = alpha * e1 + beta * e2, solving a 2x2 Gram system.
 
-    // use min-max scaling to improve numerical stability
-    let min_x = point0.x.min(point1.x).min(point2.x);
-    let max_x = point0.x.max(point1.x).max(point2.x);
-    let min_y = point0.y.min(point1.y).min(point2.y);
-    let max_y = point0.y.max(point1.y).max(point2.y);
-    let min_z = point0.z.min(point1.z).min(point2.z);
-    let max_z = point0.z.max(point1.z).max(point2.z);
-    let scale_x = if (max_x - min_x).abs() < 1e-8 {
-        1.0
+    // Translate to centroid to reduce floating-point cancellation,
+    // especially when points lie on axial planes (e.g. all z identical).
+    let centroid = (point0 + point1 + point2) / 3.0;
+    let p0 = point0 - centroid;
+    let p1 = point1 - centroid;
+    let p2 = point2 - centroid;
+
+    let e1 = p1 - p0;
+    let e2 = p2 - p0;
+
+    let d_uv1 = uv1 - uv0;
+    let d_uv2 = uv2 - uv0;
+
+    let e1e1 = e1.x * e1.x + e1.y * e1.y + e1.z * e1.z;
+    let e1e2 = e1.x * e2.x + e1.y * e2.y + e1.z * e2.z;
+    let e2e2 = e2.x * e2.x + e2.y * e2.y + e2.z * e2.z;
+
+    let det = e1e1 * e2e2 - e1e2 * e1e2;
+
+    let (a, b, c, d);
+
+    if det.abs() < 1e-30 {
+        // Fully degenerate triangle — fallback to zero gradient
+        a = 0.0;
+        b = 0.0;
+        c = 0.0;
+        d = uv0;
+    } else if det.abs() < 1e-10 {
+        // Near-degenerate: use pseudoinverse via SVD of the 3x3 system
+        // [p0x p0y p0z 1] [a]   [uv0]
+        // [p1x p1y p1z 1] [b] = [uv1]
+        // [p2x p2y p2z 1] [c]   [uv2]
+        //                  [d]
+        // Work in centroid-relative coords, then shift d back.
+        // Build 3x3 matrix A = [p0; p1; p2] (centroid-relative) and solve A * [a,b,c]' = [uv0-d; uv1-d; uv2-d]
+        // Since it's rank-deficient, use the edge-based pseudoinverse:
+        // Construct the 2x3 matrix M = [e1^T; e2^T] and rhs = [d_uv1; d_uv2]
+        // Pseudoinverse: grad = M^T (M M^T)^{-1} rhs, regularized
+
+        // M M^T = [[e1e1, e1e2], [e1e2, e2e2]] — this is the Gram matrix we already have
+        // Use regularized inverse: add epsilon to diagonal
+        let reg = det.abs().sqrt() * 1e-6 + 1e-20;
+        let e1e1_r = e1e1 + reg;
+        let e2e2_r = e2e2 + reg;
+        let det_r = e1e1_r * e2e2_r - e1e2 * e1e2;
+        let inv_det_r = 1.0 / det_r;
+
+        let alpha = (e2e2_r * d_uv1 - e1e2 * d_uv2) * inv_det_r;
+        let beta = (e1e1_r * d_uv2 - e1e2 * d_uv1) * inv_det_r;
+
+        a = alpha * e1.x + beta * e2.x;
+        b = alpha * e1.y + beta * e2.y;
+        c = alpha * e1.z + beta * e2.z;
+
+        // d in centroid-relative space, then shift back
+        let d_local = uv0 - (a * p0.x + b * p0.y + c * p0.z);
+        d = d_local - (a * centroid.x + b * centroid.y + c * centroid.z);
     } else {
-        1.0 / (max_x - min_x)
-    };
-    let scale_y = if (max_y - min_y).abs() < 1e-8 {
-        1.0
-    } else {
-        1.0 / (max_y - min_y)
-    };
-    let scale_z = if (max_z - min_z).abs() < 1e-8 {
-        1.0
-    } else {
-        1.0 / (max_z - min_z)
-    };
+        let inv_det = 1.0 / det;
+        let alpha = (e2e2 * d_uv1 - e1e2 * d_uv2) * inv_det;
+        let beta = (e1e1 * d_uv2 - e1e2 * d_uv1) * inv_det;
 
-    let scaled_point0 = Vector3 {
-        x: (point0.x - min_x) * scale_x,
-        y: (point0.y - min_y) * scale_y,
-        z: (point0.z - min_z) * scale_z,
-    };
+        // grad = alpha * e1 + beta * e2
+        a = alpha * e1.x + beta * e2.x;
+        b = alpha * e1.y + beta * e2.y;
+        c = alpha * e1.z + beta * e2.z;
 
-    let scaled_point1 = Vector3 {
-        x: (point1.x - min_x) * scale_x,
-        y: (point1.y - min_y) * scale_y,
-        z: (point1.z - min_z) * scale_z,
-    };
+        // d in centroid-relative space, then shift back
+        let d_local = uv0 - (a * p0.x + b * p0.y + c * p0.z);
+        d = d_local - (a * centroid.x + b * centroid.y + c * centroid.z);
+    }
 
-    let scaled_point2 = Vector3 {
-        x: (point2.x - min_x) * scale_x,
-        y: (point2.y - min_y) * scale_y,
-        z: (point2.z - min_z) * scale_z,
-    };
+    // verify solution closeness (against original points)
+    let _uv0_check = a * point0.x + b * point0.y + c * point0.z + d;
+    let _uv1_check = a * point1.x + b * point1.y + c * point1.z + d;
+    let _uv2_check = a * point2.x + b * point2.y + c * point2.z + d;
 
-    // Define the matrix A (3x4) with 3 vertices and the extra 1s column
-    let a = DMatrix::from_row_slice(
-        3,
-        4,
-        &[
-            scaled_point0.x,
-            scaled_point0.y,
-            scaled_point0.z,
-            1.0, // Vertex 1: (1, 2, 3, 1)
-            scaled_point1.x,
-            scaled_point1.y,
-            scaled_point1.z,
-            1.0, // Vertex 2: (4, 5, 6, 1)
-            scaled_point2.x,
-            scaled_point2.y,
-            scaled_point2.z,
-            1.0, // Vertex 3: (7, 8, 9, 1)
-        ],
-    );
-
-    // Define the u-coordinates vector y (3x1)
-    let u = DMatrix::from_column_slice(
-        3,
-        1,
-        &[
-            uv0, // u1
-            uv1, // u2
-            uv2, // u3
-        ],
-    );
-
-    // Compute the SVD of A
-    let svd = SVD::new(a.clone(), true, true);
-
-    // Compute the pseudoinverse of A
-    let a_pseudo = svd
-        .pseudo_inverse(unsafe { PLANE_EPSILON as f64 })
-        .expect("Pseudoinverse failed");
-
-    // Solve for x using the pseudoinverse: x = A+ * y
-    let mut x = &a_pseudo * u;
-
-    // rescale solution back to original space
-    x[0] = x[0] * scale_x;
-    x[1] = x[1] * scale_y;
-    x[2] = x[2] * scale_z;
-    x[3] = x[3] - x[0] * min_x - x[1] * min_y - x[2] * min_z;
-
-    // verify solution closeness
-    let _uv0_check = x[0] * point0.x + x[1] * point0.y + x[2] * point0.z + x[3];
-    let _uv1_check = x[0] * point1.x + x[1] * point1.y + x[2] * point1.z + x[3];
-    let _uv2_check = x[0] * point2.x + x[1] * point2.y + x[2] * point2.z + x[3];
-
-    if !(_uv0_check.abs_diff_eq(&uv0, 0.001)
-        && _uv1_check.abs_diff_eq(&uv1, 0.001)
-        && _uv2_check.abs_diff_eq(&uv2, 0.001))
+    if !(_uv0_check.abs_diff_eq(&uv0, 0.0001)
+        && _uv1_check.abs_diff_eq(&uv1, 0.0001)
+        && _uv2_check.abs_diff_eq(&uv2, 0.0001))
     {
         println!(
-            "SVD solution not accurate enough, {} {} {} vs {} {} {}",
+            "TexGen solution not accurate enough, {} {} {} vs {} {} {}",
             _uv0_check, _uv1_check, _uv2_check, uv0, uv1, uv2
         );
         println!("Points: \n{:?}\n{:?}\n{:?}", point0, point1, point2);
         println!("UVs: \n{}\n{}\n{}", uv0, uv1, uv2);
     }
-    return PlaneF {
+
+    PlaneF {
         normal: Vector3 {
-            x: x[0] as f32,
-            y: x[1] as f32,
-            z: x[2] as f32,
+            x: a as f32,
+            y: b as f32,
+            z: c as f32,
         },
-        distance: x[3] as f32,
-    };
+        distance: d as f32,
+    }
 }

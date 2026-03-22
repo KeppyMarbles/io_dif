@@ -45,7 +45,7 @@ bl_info = {
     "author": "RandomityGuy",
     "description": "Dif import and export plugin for blender",
     "blender": (2, 80, 0),
-    "version": (1, 3, 4),
+    "version": (1, 3, 6),
     "location": "File > Import-Export",
     "warning": "",
     "category": "Import-Export",
@@ -253,6 +253,18 @@ class ImportDIF(bpy.types.Operator, ImportHelper):
     filter_glob: StringProperty(
         default="*.dif",
         options={"HIDDEN"},
+    )
+
+    import_highest_lod_only: BoolProperty(
+        name="Highest LOD Only",
+        description="Import only the highest detail LOD level",
+        default=False,
+    )
+
+    import_lightmaps: BoolProperty(
+        name="Import Lightmaps",
+        description="Import embedded lightmap textures",
+        default=True,
     )
 
     check_extension = True
@@ -485,8 +497,10 @@ def register():
             os.path.dirname(os.path.realpath(__file__)), "DifBuilderLib.so"
         )
     if not os.path.isfile(dllpath):
-        raise Exception(
-            "There was an error loading the necessary dll required for dif export. Please download the plugin from the proper location: https://github.com/RandomityGuy/io_dif/releases"
+        print(
+            "Warning: DifBuilderLib not found - DIF export will be unavailable. "
+            "DIF import will still work. For export support, download from: "
+            "https://github.com/RandomityGuy/io_dif/releases"
         )
 
     bpy.types.Object.dif_props = PointerProperty(type=InteriorSettings)
